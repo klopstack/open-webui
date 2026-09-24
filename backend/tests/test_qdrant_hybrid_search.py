@@ -13,7 +13,10 @@ bootstrap) against a fake ``qdrant-client`` library client, covering:
 * tenant scoping in the multitenancy client.
 """
 
+import importlib
 import inspect
+import sys
+import types
 
 import pytest
 
@@ -34,11 +37,48 @@ def rrf(weight, rank):
     return weight / (60.0 + rank)
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _bind_hybrid_search():
+    """Put the backend modules in the "fastembed installed" state.
+
+    Production code binds ``hybrid_search`` onto the Qdrant classes at import
+    time, conditioned on ``FASTEMBED_AVAILABLE``. Inject a stub ``fastembed``
+    package and reload both backend modules so the classes carry the override
+    for the duration of this test module (mirroring a deployment that has the
+    optional dependency installed). Teardown restores the unbound state.
+    """
+    fastembed_mod = types.ModuleType("fastembed")
+    sparse_mod = types.ModuleType("fastembed.sparse")
+
+    class _StubSparseTextEmbedding:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    sparse_mod.SparseTextEmbedding = _StubSparseTextEmbedding
+    fastembed_mod.sparse = sparse_mod
+
+    saved = {name: sys.modules.get(name) for name in ("fastembed", "fastembed.sparse")}
+    sys.modules["fastembed"] = fastembed_mod
+    sys.modules["fastembed.sparse"] = sparse_mod
+    importlib.reload(q)
+    importlib.reload(qm)
+    yield
+    for name, module in saved.items():
+        if module is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = module
+    importlib.reload(q)
+    importlib.reload(qm)
+
+
 # --------------------------------------------------------------------------- #
 # Contract
 # --------------------------------------------------------------------------- #
 class TestContract:
-    def test_both_clients_override_hybrid_search(self):
+    def test_both_clients_bind_hybrid_search_when_fastembed_available(self):
+        # The autouse fixture reloaded the modules with fastembed importable,
+        # so the import-time binding must have attached the override.
         assert q.QdrantClient.hybrid_search is not VectorDBBase.hybrid_search
         assert qm.QdrantClient.hybrid_search is not VectorDBBase.hybrid_search
 
@@ -333,3 +373,47 @@ class TestMergeHybridSearchResults:
         high = merge_hybrid_search_results(vector_result, [], num_queries=1, limit=10, hybrid_bm25_weight=5.0)
         clamped = merge_hybrid_search_results(vector_result, [], num_queries=1, limit=10, hybrid_bm25_weight=1.0)
         assert high.distances[0] == clamped.distances[0]
+
+
+# --------------------------------------------------------------------------- #
+# Advertisement: Qdrant must not claim hybrid support when fastembed is absent
+# --------------------------------------------------------------------------- #
+class TestAdvertisement:
+    """Advertising is driven purely by the import-time binding: the override
+    exists iff fastembed was importable when the module loaded, so the stock
+    ``supports_hybrid_search`` class-identity check is accurate."""
+
+    def _facade(self, client):
+        from open_webui.retrieval.vector.async_client import AsyncVectorDBClient
+
+        return AsyncVectorDBClient(sync_client=client)
+
+    def test_advertises_when_fastembed_present(self, make_client, encoder):
+        # Autouse fixture: modules reloaded with fastembed importable.
+        client, _ = make_client(q.QdrantClient, hybrid=True, encoder=encoder)
+        assert self._facade(client).supports_hybrid_search is True
+
+    def test_does_not_advertise_when_fastembed_missing(self, make_client, encoder, monkeypatch):
+        # Simulate the import-time outcome when fastembed is absent: the class
+        # keeps the base no-op hybrid_search.
+        monkeypatch.setattr(q.QdrantClient, "hybrid_search", VectorDBBase.hybrid_search)
+        client, _ = make_client(q.QdrantClient, hybrid=True, encoder=encoder)
+        assert self._facade(client).supports_hybrid_search is False
+
+    def test_multitenancy_follows_same_rule(self, make_client, encoder, monkeypatch):
+        client, _ = make_client(qm.QdrantClient, hybrid=True, encoder=encoder)
+        assert self._facade(client).supports_hybrid_search is True
+        monkeypatch.setattr(qm.QdrantClient, "hybrid_search", VectorDBBase.hybrid_search)
+        assert self._facade(client).supports_hybrid_search is False
+
+    def test_unconditional_backend_still_advertises(self):
+        # A backend that overrides hybrid_search unconditionally (e.g.
+        # pgvector) keeps advertising support.
+        from open_webui.retrieval.vector.async_client import AsyncVectorDBClient
+
+        class AlwaysOn(VectorDBBase):
+            def hybrid_search(self, *args, **kwargs):
+                return None
+
+        AlwaysOn.__abstractmethods__ = frozenset()
+        assert AsyncVectorDBClient(sync_client=AlwaysOn()).supports_hybrid_search is True

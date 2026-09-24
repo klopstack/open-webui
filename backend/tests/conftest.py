@@ -49,6 +49,9 @@ def _bootstrap() -> None:
             "QDRANT_SPARSE_VECTOR_NAME": "sparse",
             "QDRANT_TIMEOUT": 5,
             "QDRANT_URI": "http://localhost:6333",
+            "ENABLE_MILVUS_MULTITENANCY_MODE": False,
+            "ENABLE_QDRANT_MULTITENANCY_MODE": True,
+            "VECTOR_DB": "qdrant",
         }.items():
             setattr(cfg, name, default)
         sys.modules["open_webui.config"] = cfg
@@ -57,6 +60,7 @@ def _bootstrap() -> None:
     if "open_webui.env" not in sys.modules:
         env = types.ModuleType("open_webui.env")
         env.RAG_METADATA_MAX_VALUE_CHARS = None
+        env.USE_SLIM = False
         sys.modules["open_webui.env"] = env
 
     # open_webui.utils.misc: only sanitize_text_for_db is used by vector/utils.
@@ -64,6 +68,13 @@ def _bootstrap() -> None:
         misc = types.ModuleType("open_webui.utils.misc")
         misc.sanitize_text_for_db = lambda value: value
         sys.modules["open_webui.utils.misc"] = misc
+
+    # fastapi: only HTTPException is referenced by the vector factory (imported
+    # transitively by the async facade under test).
+    if "fastapi" not in sys.modules:
+        fastapi = types.ModuleType("fastapi")
+        fastapi.HTTPException = type("HTTPException", (Exception,), {})
+        sys.modules["fastapi"] = fastapi
 
 
 _bootstrap()

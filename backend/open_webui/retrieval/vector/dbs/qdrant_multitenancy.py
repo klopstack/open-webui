@@ -401,81 +401,6 @@ class QdrantClient(VectorDBBase):
             distances=[[(point.score + 1.0) / 2.0 for point in query_response.points]],
         )
 
-    def hybrid_search(
-        self,
-        collection_name: str,
-        query: str,
-        vectors: List[List[float | int]],
-        filter: Optional[Dict] = None,
-        limit: int = 10,
-        hybrid_bm25_weight: float = 0.5,
-    ) -> Optional[SearchResult]:
-        """
-        Backend-native hybrid search: fuse dense (semantic) and sparse (BM25)
-        retrieval for a single query, mirroring the pgvector contract.
-
-        Returns None when hybrid search is unavailable (disabled, `fastembed`
-        missing, or the collection is not a hybrid collection) so the caller
-        falls back to the legacy hybrid path.
-        """
-        if not self.client or not query or not query.strip():
-            return None
-        if self._get_sparse_encoder() is None:
-            return None
-        if limit is None:
-            limit = NO_LIMIT
-        limit = max(1, limit)
-
-        mt_collection, tenant_id = self._get_collection_and_tenant_id(collection_name)
-        if not self.client.collection_exists(collection_name=mt_collection):
-            return None
-        if not self._is_hybrid_collection(mt_collection):
-            return None
-
-        bm25_weight = min(max(hybrid_bm25_weight, 0.0), 1.0)
-        vector_weight = 1.0 - bm25_weight
-        combined_filter = self._build_hybrid_filter(tenant_id, filter)
-
-        vector_result = None
-        if vector_weight > 0 and vectors:
-            vector_result = self.search(
-                collection_name=collection_name,
-                vectors=vectors,
-                filter=filter,
-                limit=limit,
-            )
-
-        fts_results: List[Dict[str, Any]] = []
-        if bm25_weight > 0:
-            try:
-                sparse_query = self._encode_sparse_query(query)
-                sparse_response = self.client.query_points(
-                    collection_name=mt_collection,
-                    query=sparse_query,
-                    using=self.QDRANT_SPARSE_VECTOR_NAME,
-                    limit=limit,
-                    query_filter=combined_filter,
-                )
-                fts_results = [
-                    {
-                        'id': point.id,
-                        'text': point.payload.get('text', ''),
-                        'vmetadata': point.payload.get('metadata', {}),
-                    }
-                    for point in sparse_response.points
-                ]
-            except Exception as e:
-                log.exception('Error during Qdrant sparse (BM25) search: %s', e)
-                return None
-
-        return merge_hybrid_search_results(
-            vector_result=vector_result,
-            fts_results=fts_results,
-            num_queries=1,
-            limit=limit,
-            hybrid_bm25_weight=hybrid_bm25_weight,
-        )
-
     def query(self, collection_name: str, filter: Dict[str, Any], limit: Optional[int] = None):
         """
         Query points with filters and tenant isolation.
@@ -559,3 +484,90 @@ class QdrantClient(VectorDBBase):
             collection_name=mt_collection,
             points_selector=models.FilterSelector(filter=models.Filter(must=[_tenant_filter(tenant_id)])),
         )
+
+
+def _qdrant_multitenancy_hybrid_search(
+    self: QdrantClient,
+    collection_name: str,
+    query: str,
+    vectors: List[List[float | int]],
+    filter: Optional[Dict] = None,
+    limit: int = 10,
+    hybrid_bm25_weight: float = 0.5,
+) -> Optional[SearchResult]:
+    """
+    Backend-native hybrid search: fuse dense (semantic) and sparse (BM25)
+    retrieval for a single query, mirroring the pgvector contract.
+
+    Bound onto ``QdrantClient.hybrid_search`` only when the optional
+    ``fastembed`` dependency is importable (see module bottom), so the standard
+    ``supports_hybrid_search`` detection advertises native hybrid support only
+    when it can actually run. Returns None when the feature flag is off or the
+    collection is not a hybrid collection, so the caller falls back to the
+    legacy hybrid path.
+    """
+    if not self.client or not query or not query.strip():
+        return None
+    if self._get_sparse_encoder() is None:
+        return None
+    if limit is None:
+        limit = NO_LIMIT
+    limit = max(1, limit)
+
+    mt_collection, tenant_id = self._get_collection_and_tenant_id(collection_name)
+    if not self.client.collection_exists(collection_name=mt_collection):
+        return None
+    if not self._is_hybrid_collection(mt_collection):
+        return None
+
+    bm25_weight = min(max(hybrid_bm25_weight, 0.0), 1.0)
+    vector_weight = 1.0 - bm25_weight
+    combined_filter = self._build_hybrid_filter(tenant_id, filter)
+
+    vector_result = None
+    if vector_weight > 0 and vectors:
+        vector_result = self.search(
+            collection_name=collection_name,
+            vectors=vectors,
+            filter=filter,
+            limit=limit,
+        )
+
+    fts_results: List[Dict[str, Any]] = []
+    if bm25_weight > 0:
+        try:
+            sparse_query = self._encode_sparse_query(query)
+            sparse_response = self.client.query_points(
+                collection_name=mt_collection,
+                query=sparse_query,
+                using=self.QDRANT_SPARSE_VECTOR_NAME,
+                limit=limit,
+                query_filter=combined_filter,
+            )
+            fts_results = [
+                {
+                    'id': point.id,
+                    'text': point.payload.get('text', ''),
+                    'vmetadata': point.payload.get('metadata', {}),
+                }
+                for point in sparse_response.points
+            ]
+        except Exception as e:
+            log.exception('Error during Qdrant sparse (BM25) search: %s', e)
+            return None
+
+    return merge_hybrid_search_results(
+        vector_result=vector_result,
+        fts_results=fts_results,
+        num_queries=1,
+        limit=limit,
+        hybrid_bm25_weight=hybrid_bm25_weight,
+    )
+
+
+if FASTEMBED_AVAILABLE:
+    # Expose native hybrid search (and thereby advertise it via
+    # supports_hybrid_search) only when the optional fastembed dependency is
+    # present. Without it the class keeps the base no-op, so the pipeline uses
+    # the legacy hybrid path.
+    QdrantClient.hybrid_search = _qdrant_multitenancy_hybrid_search
