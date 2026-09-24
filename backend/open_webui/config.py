@@ -618,6 +618,14 @@ QDRANT_TIMEOUT = int(os.getenv('QDRANT_TIMEOUT', '5'))
 QDRANT_HNSW_M = int(os.getenv('QDRANT_HNSW_M', '16'))
 ENABLE_QDRANT_MULTITENANCY_MODE = os.getenv('ENABLE_QDRANT_MULTITENANCY_MODE', 'true').lower() == 'true'
 QDRANT_COLLECTION_PREFIX = os.getenv('QDRANT_COLLECTION_PREFIX', 'open-webui')
+# Qdrant hybrid (dense + sparse/BM25) search. Opt-in; requires the optional
+# `fastembed` dependency for sparse text embeddings. See the Qdrant backends in
+# retrieval/vector/dbs/ for details.
+QDRANT_HYBRID_SEARCH_ENABLED = os.getenv('QDRANT_HYBRID_SEARCH_ENABLED', 'false').lower() == 'true'
+QDRANT_SPARSE_EMBEDDING_MODEL = os.getenv('QDRANT_SPARSE_EMBEDDING_MODEL', 'Qdrant/bm25')
+QDRANT_DENSE_VECTOR_NAME = os.getenv('QDRANT_DENSE_VECTOR_NAME', 'dense')
+QDRANT_SPARSE_VECTOR_NAME = os.getenv('QDRANT_SPARSE_VECTOR_NAME', 'sparse')
+QDRANT_SPARSE_ON_DISK = os.getenv('QDRANT_SPARSE_ON_DISK', 'false').lower() == 'true'
 
 WEAVIATE_HTTP_HOST = os.getenv('WEAVIATE_HTTP_HOST', '')
 WEAVIATE_GRPC_HOST = os.getenv('WEAVIATE_GRPC_HOST', '')
