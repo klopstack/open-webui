@@ -1420,6 +1420,9 @@ async def get_knowledge_files_by_id(
 class KnowledgeFileIdForm(BaseModel):
     file_id: str
     directory_id: Optional[str] = None
+    # When False, link the file to the KB without embedding it (browse-only
+    # companion files). The file must still exist; it need not be processed.
+    index: bool = True
 
 
 @router.post('/{id}/file/add', response_model=KnowledgeFilesResponse | None)
@@ -1463,7 +1466,7 @@ async def add_file_to_knowledge_by_id(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
-    if not file.data:
+    if form_data.index and not file.data:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=ERROR_MESSAGES.FILE_NOT_PROCESSED,
@@ -1477,14 +1480,15 @@ async def add_file_to_knowledge_by_id(
                 detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
             )
 
-    # Add content to the vector database
+    # Add content to the vector database (unless this is a browse-only link)
     try:
-        await process_file(
-            request,
-            ProcessFileForm(file_id=form_data.file_id, collection_name=id),
-            user=user,
-            db=db,
-        )
+        if form_data.index:
+            await process_file(
+                request,
+                ProcessFileForm(file_id=form_data.file_id, collection_name=id),
+                user=user,
+                db=db,
+            )
 
         # Add file to knowledge base
         await Knowledges.add_file_to_knowledge_by_id(
@@ -1994,6 +1998,12 @@ async def sync_knowledge_cleanup(
     for file_id in form_data.file_ids:
         file = await Files.get_file_by_id(file_id, db=db)
         if not file:
+            continue
+
+        # Reference files are owned by an external archive — a sync must not
+        # drop their rows/vectors (their bytes are never touched either way).
+        if isinstance(file.path, str) and file.path.startswith('ref:'):
+            log.warning('sync/cleanup: skipping reference file %s (externally owned)', file_id)
             continue
 
         # Only clean up files that belong to this knowledge base.

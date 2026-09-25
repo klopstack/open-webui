@@ -168,6 +168,17 @@ AZURE_STORAGE_CONTAINER_NAME = os.getenv('AZURE_STORAGE_CONTAINER_NAME', None)
 AZURE_STORAGE_KEY = os.getenv('AZURE_STORAGE_KEY', None)
 
 ####################################
+# Reference Files (external byte storage)
+####################################
+
+# When enabled, uploads whose metadata carries external_ref.path store a
+# pointer ("ref:<abs>") instead of copying the bytes into UPLOAD_DIR. The
+# bytes are served on demand from REFERENCE_FILES_ROOT and are never deleted
+# by Open WebUI (they belong to the external archive).
+ENABLE_REFERENCE_FILES = os.getenv('ENABLE_REFERENCE_FILES', 'false').lower() == 'true'
+REFERENCE_FILES_ROOT = os.getenv('REFERENCE_FILES_ROOT', None)
+
+####################################
 # File Upload DIR
 ####################################
 

@@ -9,6 +9,7 @@ from open_webui.config import (
     AZURE_STORAGE_CONTAINER_NAME,
     AZURE_STORAGE_ENDPOINT,
     AZURE_STORAGE_KEY,
+    ENABLE_REFERENCE_FILES,
     GCS_BUCKET_NAME,
     GOOGLE_APPLICATION_CREDENTIALS_JSON,
     S3_ACCESS_KEY_ID,
@@ -20,6 +21,7 @@ from open_webui.config import (
     S3_REGION_NAME,
     S3_SECRET_ACCESS_KEY,
     S3_USE_ACCELERATE_ENDPOINT,
+    REFERENCE_FILES_ROOT,
     STORAGE_PROVIDER,
     UPLOAD_DIR,
 )
@@ -59,6 +61,21 @@ class StorageProvider(ABC):
         pass
 
 
+def resolve_reference_path(file_path: str) -> str:
+    """Resolve a 'ref:' storage path to its location in the external archive.
+
+    The path must lie under REFERENCE_FILES_ROOT; anything else is refused.
+    """
+    ref = file_path[len('ref:') :]
+    if not REFERENCE_FILES_ROOT:
+        raise RuntimeError('Reference file requested but REFERENCE_FILES_ROOT is not set')
+    root = os.path.realpath(REFERENCE_FILES_ROOT)
+    candidate = os.path.realpath(ref)
+    if candidate != root and not candidate.startswith(root + os.sep):
+        raise PermissionError(f'Reference file escapes REFERENCE_FILES_ROOT: {file_path}')
+    return candidate
+
+
 class LocalStorageProvider(StorageProvider):
     @staticmethod
     def upload_file(file: BinaryIO, filename: str, tags: Dict[str, str]) -> Tuple[bytes, str]:
@@ -73,11 +90,17 @@ class LocalStorageProvider(StorageProvider):
     @staticmethod
     def get_file(file_path: str) -> str:
         """Handles downloading of the file from local storage."""
+        if isinstance(file_path, str) and file_path.startswith('ref:'):
+            return resolve_reference_path(file_path)
         return file_path
 
     @staticmethod
     def delete_file(file_path: str) -> None:
         """Handles deletion of the file from local storage."""
+        if isinstance(file_path, str) and file_path.startswith('ref:'):
+            # Reference files live in an external archive — never delete them.
+            log.info('Skipping deletion of reference file: %s', file_path)
+            return
         filename = os.path.basename(file_path)
         file_path = os.path.join(UPLOAD_DIR, filename)
         if os.path.isfile(file_path):

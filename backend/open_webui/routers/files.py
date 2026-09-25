@@ -21,7 +21,14 @@ from fastapi import (
     status,
 )
 from fastapi.responses import FileResponse, StreamingResponse
-from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL, STORAGE_LOCAL_CACHE, STORAGE_PROVIDER, UPLOAD_DIR
+from open_webui.config import (
+    BYPASS_ADMIN_ACCESS_CONTROL,
+    ENABLE_REFERENCE_FILES,
+    REFERENCE_FILES_ROOT,
+    STORAGE_LOCAL_CACHE,
+    STORAGE_PROVIDER,
+    UPLOAD_DIR,
+)
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.events import EVENTS, publish_event
 from open_webui.internal.db import get_async_db_context, get_async_session
@@ -108,6 +115,40 @@ def _cleanup_local_cache(file_path: str) -> None:
         log.warning(f'Failed to clean up local cache for {file_path}: {e}')
 
 
+def _resolve_reference_upload(file_metadata: dict) -> tuple[str, int] | None:
+    """Validate an external_ref upload request.
+
+    Returns (abs_path, size) when the metadata carries a valid
+    external_ref.path under REFERENCE_FILES_ROOT, else None.
+    """
+    if not ENABLE_REFERENCE_FILES:
+        return None
+    ref = file_metadata.get('external_ref')
+    if not isinstance(ref, dict):
+        return None
+    path = ref.get('path')
+    if not isinstance(path, str) or not path:
+        return None
+    if not REFERENCE_FILES_ROOT:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.DEFAULT('external_ref.path given but REFERENCE_FILES_ROOT is not set'),
+        )
+    root = os.path.realpath(REFERENCE_FILES_ROOT)
+    candidate = os.path.realpath(path)
+    if candidate != root and not candidate.startswith(root + os.sep):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.DEFAULT('external_ref.path escapes REFERENCE_FILES_ROOT'),
+        )
+    if not os.path.isfile(candidate):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.DEFAULT('external_ref.path does not exist'),
+        )
+    return candidate, os.path.getsize(candidate)
+
+
 def _matches_configured_mime_type(supported: list[str] | str, content_type: str) -> bool:
     if isinstance(supported, str):
         supported = supported.split(',')
@@ -191,12 +232,17 @@ async def process_uploaded_file(
                 # configured content extraction engine.
                 if not content_type:
                     log.info('File type %s is not provided, but trying to process anyway', file.content_type)
-                await process_file(
-                    request,
-                    ProcessFileForm(file_id=file_item.id),
-                    user=user,
-                    db=db_session,
-                )
+                # When the upload is auto-linked to a knowledge base, the
+                # KB-specific process_file below is the only embedding pass —
+                # skip the generic file-{id} collection so the same content
+                # is not embedded twice.
+                if not file_metadata.get('knowledge_id'):
+                    await process_file(
+                        request,
+                        ProcessFileForm(file_id=file_item.id),
+                        user=user,
+                        db=db_session,
+                    )
 
             # Auto-link to Knowledge Collection when uploaded from one (#24807).
             # Mirrors POST /knowledge/{id}/file/add so linking doesn't depend
@@ -252,6 +298,13 @@ async def process_uploaded_file(
                         if not knowledge_file:
                             raise Exception(f'Failed to link file {file_item.id} to knowledge {knowledge_id}')
                         log.info('Linked file %s to knowledge %s', file_item.id, knowledge_id)
+                        await publish_event(
+                            request,
+                            EVENTS.KNOWLEDGE_FILE_ADDED,
+                            actor=user,
+                            subject_id=file_item.id,
+                            data={'knowledge_id': knowledge_id, 'directory_id': directory_id},
+                        )
                 except Exception as e:
                     log.warning(f'Failed to link file {file_item.id} to knowledge {knowledge_id}: {e}')
                     raise
@@ -371,39 +424,56 @@ async def upload_file_handler(
             'OpenWebUI-User-Name': user.name,
             'OpenWebUI-File-Id': id,
         }
-        try:
-            contents, file_path = await asyncio.to_thread(Storage.upload_file, file.file, filename, tags)
-        except OSError as e:
-            if e.errno != errno.ENAMETOOLONG:
-                log.exception(e)
+        # Reference files: the bytes live in an external archive (e.g. a
+        # document store). Store a pointer instead of copying them into
+        # UPLOAD_DIR; they are served on demand and never deleted here.
+        ref_resolved = _resolve_reference_upload(file_metadata)
+        if ref_resolved is not None:
+            ref_path, ref_size = ref_resolved
+            if not file_metadata.get('file_hash'):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=ERROR_MESSAGES.DEFAULT(e.strerror or 'Error uploading file'),
+                    detail=ERROR_MESSAGES.DEFAULT('file_hash is required for external_ref uploads'),
                 )
-
-            file.file.seek(0)
-            filename = f'{id}.{file_extension}' if file_extension else id
+            file_path = f'ref:{ref_path}'
+            contents = b''
+            file_hash = file_metadata['file_hash']
+            stored_size = ref_size
+        else:
             try:
                 contents, file_path = await asyncio.to_thread(Storage.upload_file, file.file, filename, tags)
             except OSError as e:
-                log.exception(e)
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=ERROR_MESSAGES.DEFAULT(e.strerror or 'Error uploading file'),
-                )
-        max_size = await Config.get('rag.file.max_size')
-        if max_size and len(contents) > int(max_size) * 1024 * 1024:
-            await asyncio.to_thread(Storage.delete_file, file_path)
-            raise HTTPException(
-                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                detail=ERROR_MESSAGES.FILE_TOO_LARGE(size=f'{max_size} MB'),
-            )
+                if e.errno != errno.ENAMETOOLONG:
+                    log.exception(e)
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=ERROR_MESSAGES.DEFAULT(e.strerror or 'Error uploading file'),
+                    )
 
-        # SHA-256 of raw uploaded bytes for incremental sync diffing.
-        # If the client pre-computed and sent file_hash, use that.
-        file_hash = file_metadata.get('file_hash') or await asyncio.to_thread(
-            lambda: hashlib.sha256(contents).hexdigest()
-        )
+                file.file.seek(0)
+                filename = f'{id}.{file_extension}' if file_extension else id
+                try:
+                    contents, file_path = await asyncio.to_thread(Storage.upload_file, file.file, filename, tags)
+                except OSError as e:
+                    log.exception(e)
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=ERROR_MESSAGES.DEFAULT(e.strerror or 'Error uploading file'),
+                    )
+            max_size = await Config.get('rag.file.max_size')
+            if max_size and len(contents) > int(max_size) * 1024 * 1024:
+                await asyncio.to_thread(Storage.delete_file, file_path)
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail=ERROR_MESSAGES.FILE_TOO_LARGE(size=f'{max_size} MB'),
+                )
+
+            # SHA-256 of raw uploaded bytes for incremental sync diffing.
+            # If the client pre-computed and sent file_hash, use that.
+            file_hash = file_metadata.get('file_hash') or await asyncio.to_thread(
+                lambda: hashlib.sha256(contents).hexdigest()
+            )
+            stored_size = len(contents)
 
         file_item = await Files.insert_new_file(
             user.id,
@@ -418,7 +488,7 @@ async def upload_file_handler(
                     'meta': {
                         'name': name,
                         'content_type': (file.content_type if isinstance(file.content_type, str) else None),
-                        'size': len(contents),
+                        'size': stored_size,
                         'file_hash': file_hash,
                         'data': file_metadata,
                     },
