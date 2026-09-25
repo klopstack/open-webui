@@ -1981,6 +1981,11 @@ async def process_file(
                 # Usage: /knowledge/{id}/file/add, /knowledge/{id}/file/update
                 # Reuse file-{id} chunks when they exist; otherwise restore file-{id}
                 # from stored file content while adding the file to the knowledge collection.
+                # If neither exists (e.g. a reference file uploaded with
+                # process=False and linked via /knowledge/{id}/file/add, or a
+                # KB-linked upload whose generic file-{id} pass was skipped),
+                # extract directly from the file so the KB collection is the
+                # ONLY embedding pass.
 
                 file_result = await ASYNC_VECTOR_DB_CLIENT.query(
                     collection_name=file_collection_name, filter={'file_id': file.id}
@@ -2012,9 +2017,39 @@ async def process_file(
                     ]
                     collection_names.append(file_collection_name)
                 else:
-                    raise ValueError(ERROR_MESSAGES.EMPTY_CONTENT)
+                    # Direct-extraction path: no per-file chunks and no stored
+                    # content — load the file now and embed it into the KB
+                    # collection only (no file-{id} collection is created).
+                    file_path = file.path
+                    if file_path:
+                        file_path = await asyncio.to_thread(Storage.get_file, file_path)
+                        loader_config = await get_loader_config()
+                        loader = build_loader_from_config(request, loader_config)
+                        loader.user = user
+                        loader.metadata = {
+                            'file_id': file.id,
+                            'file_name': file.filename,
+                            'file_content_type': file.meta.get('content_type'),
+                        }
+                        docs = await loader.aload(file.filename, file.meta.get('content_type'), file_path)
+                        docs = [
+                            Document(
+                                page_content=doc.page_content,
+                                metadata={
+                                    **filter_file_metadata(file.meta),
+                                    **filter_metadata(doc.metadata),
+                                    'name': file.filename,
+                                    'created_by': file.user_id,
+                                    'file_id': file.id,
+                                    'source': file.filename,
+                                },
+                            )
+                            for doc in docs
+                        ]
+                    else:
+                        raise ValueError(ERROR_MESSAGES.EMPTY_CONTENT)
 
-                text_content = stored_content or ''
+                text_content = stored_content if stored_content is not None else ' '.join([doc.page_content for doc in docs])
             else:
                 # Process the file and save the content
                 # Usage: /files/

@@ -1466,7 +1466,11 @@ async def add_file_to_knowledge_by_id(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
-    if form_data.index and not file.data:
+    # A file can be indexed if it has stored content (file.data) OR a path to
+    # extract from (file.path — including ref: pointers). process_file's KB
+    # branch extracts directly when neither per-file chunks nor stored content
+    # exist, so only reject files that have neither (truly unprocessable).
+    if form_data.index and not file.data and not file.path:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=ERROR_MESSAGES.FILE_NOT_PROCESSED,
