@@ -2260,6 +2260,37 @@ async def _verify_knowledge_write_access(id: str, user, db: AsyncSession):
     return knowledge
 
 
+@router.get('/{id}/dirs', response_model=list[KnowledgeDirectoryModel])
+async def list_knowledge_directories(
+    id: str,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """List all directories of a knowledge base (flat, with parent_id)."""
+    knowledge = await Knowledges.get_knowledge_by_id(id=id, db=db)
+    if not knowledge:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+    if not (
+        user.role == 'admin'
+        or knowledge.user_id == user.id
+        or await AccessGrants.has_access(
+            user_id=user.id,
+            resource_type='knowledge',
+            resource_id=knowledge.id,
+            permission='read',
+            db=db,
+        )
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+    return await Knowledges.get_all_directories(id, db=db)
+
+
 @router.post('/{id}/dirs/create', response_model=KnowledgeDirectoryModel)
 async def create_knowledge_directory(
     request: Request,
