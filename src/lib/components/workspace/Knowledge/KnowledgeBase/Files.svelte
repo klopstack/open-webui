@@ -7,7 +7,7 @@
 	dayjs.extend(relativeTime);
 
 	import { getContext } from 'svelte';
-	const i18n = getContext('i18n');
+	const i18n = getContext<any>('i18n');
 
 	import { capitalizeFirstLetter, formatFileSize } from '$lib/utils';
 	import { WEBUI_BASE_URL } from '$lib/constants';
@@ -71,10 +71,17 @@
 		};
 	};
 
-	export let knowledge = null;
+	type KnowledgeDirectory = {
+		id: string;
+		name: string;
+		created_at: number;
+		updated_at: number;
+	};
+
+	export let knowledge: { write_access?: boolean } | null = null;
 	export let selectedFileId = null;
 	export let files: KnowledgeFile[] = [];
-	export let directories = [];
+	export let directories: KnowledgeDirectory[] = [];
 
 	export let onClick: (fileId: string | undefined) => void = () => {};
 	export let onDelete: (fileId: string | undefined) => void = () => {};
@@ -93,7 +100,7 @@
 	let editInput: HTMLInputElement;
 
 	const startRename = (file: KnowledgeFile) => {
-		editingFileId = file?.id ?? file?.tempId;
+		editingFileId = file?.id ?? file?.tempId ?? null;
 		editName = file?.name ?? file?.meta?.name ?? '';
 		setTimeout(() => editInput?.select(), 0);
 	};
