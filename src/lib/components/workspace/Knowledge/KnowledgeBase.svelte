@@ -64,6 +64,7 @@
 	import SyncConfirmDialog from '../../common/ConfirmDialog.svelte';
 	import ConfirmDialog from '../../common/ConfirmDialog.svelte';
 	import Drawer from '$lib/components/common/Drawer.svelte';
+	import MarkdownEditor from '$lib/components/common/MarkdownEditor.svelte';
 	import ChevronLeft from '$lib/components/icons/ChevronLeft.svelte';
 	import AccessButton from '$lib/components/common/AccessButton.svelte';
 	import AccessControlModal from '../common/AccessControlModal.svelte';
@@ -112,6 +113,10 @@
 	let selectedFile = null;
 	let selectedFileContent = '';
 	let loadingFileContent = false;
+	// Drawer view: 'wysiwyg' (TipTap editor) or 'source' (raw markdown).
+	let drawerTab = 'wysiwyg';
+	// Content as last loaded/saved — drives the dirty dot on the Save button.
+	let savedContentSnapshot = '';
 
 	let inputFiles = null;
 
@@ -251,6 +256,8 @@
 		selectedFile = file;
 		selectedFileContent = file?.data?.content ?? '';
 		loadingFileContent = false;
+		drawerTab = 'wysiwyg';
+		savedContentSnapshot = selectedFileContent;
 
 		if (!file?.id || file?.data?.content !== undefined) {
 			return;
@@ -262,6 +269,7 @@
 			if (selectedFileId === file.id) {
 				selectedFile = fileWithContent ?? file;
 				selectedFileContent = fileWithContent?.data?.content ?? '';
+				savedContentSnapshot = selectedFileContent;
 			}
 		} catch (e) {
 			if (selectedFileId === file.id) {
@@ -958,6 +966,8 @@
 				selectedFileId = null;
 				selectedFile = null;
 				selectedFileContent = '';
+				savedContentSnapshot = '';
+				drawerTab = 'wysiwyg';
 
 				await init();
 			}
@@ -1626,6 +1636,8 @@
 									selectedFile = null;
 									selectedFileContent = '';
 									loadingFileContent = false;
+									drawerTab = 'wysiwyg';
+									savedContentSnapshot = '';
 								}}
 							>
 								<div class="flex flex-col justify-start h-full max-h-full">
@@ -1669,6 +1681,12 @@
 														}}
 													>
 														{$i18n.t('Save')}
+														{#if selectedFileContent !== savedContentSnapshot}
+															<span
+																class="ml-1.5 inline-block size-1.5 rounded-full bg-blue-500"
+																aria-label={$i18n.t('Unsaved changes')}
+															></span>
+														{/if}
 														{#if isSaving}
 															<div class="ml-2 self-center">
 																<Spinner />
@@ -1679,14 +1697,53 @@
 											{/if}
 										</div>
 
+										<div
+											class="flex shrink-0 border-b border-gray-50 dark:border-gray-850/30 text-center text-sm font-normal bg-transparent dark:text-gray-200"
+										>
+											<button
+												class="min-w-fit py-1.5 px-4 border-b {drawerTab === 'wysiwyg'
+													? ' '
+													: ' border-transparent text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition"
+												type="button"
+												on:click={() => {
+													drawerTab = 'wysiwyg';
+												}}
+											>
+												{$i18n.t('WYSIWYG')}
+											</button>
+											<button
+												class="min-w-fit py-1.5 px-4 border-b {drawerTab === 'source'
+													? ' '
+													: ' border-transparent text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition"
+												type="button"
+												on:click={() => {
+													drawerTab = 'source';
+												}}
+											>
+												{$i18n.t('Source')}
+											</button>
+										</div>
+
 										{#key selectedFile?.id}
-											<textarea
-												class="w-full h-full text-xs outline-none resize-none px-3 py-2"
-												bind:value={selectedFileContent}
-												disabled={!knowledge?.write_access || loadingFileContent}
-												aria-label={$i18n.t('File content')}
-												placeholder={$i18n.t('Add content here')}
-											></textarea>
+											{#if drawerTab === 'wysiwyg'}
+												<div class="flex-1 min-h-0 px-3 py-2">
+													<MarkdownEditor
+														value={selectedFileContent}
+														editable={!!knowledge?.write_access && !loadingFileContent}
+														on:change={(e) => {
+															selectedFileContent = e.detail;
+														}}
+													/>
+												</div>
+											{:else}
+												<textarea
+													class="w-full h-full text-xs outline-none resize-none px-3 py-2"
+													bind:value={selectedFileContent}
+													disabled={!knowledge?.write_access || loadingFileContent}
+													aria-label={$i18n.t('File content')}
+													placeholder={$i18n.t('Add content here')}
+												></textarea>
+											{/if}
 										{/key}
 									</div>
 								</div>
