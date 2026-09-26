@@ -23,6 +23,33 @@
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import DirectoryRow from './DirectoryRow.svelte';
 
+	// Consolidated document metadata — written by the docbrowser plugin into
+	// the KB file's upload metadata (meta.data.doc_meta). See the owui-docs
+	// repo for the full contract; the fields below are what this UI consumes.
+	type DocMeta = {
+		schema?: number;
+		doc_key?: string;
+		title?: string;
+		category?: string;
+		media_type?: string;
+		primary?: {
+			role?: string;
+			file_id?: string | null;
+			relpath?: string;
+			media_type?: string;
+			extent?: { unit?: string; value?: number } | null;
+		};
+		markdown?: { file_id?: string; relpath?: string };
+		artifacts?: {
+			role?: string;
+			file_id?: string | null;
+			relpath?: string;
+			media_type?: string;
+		}[];
+		status?: string;
+		flags?: string[];
+	};
+
 	type KnowledgeFile = {
 		id?: string;
 		tempId?: string;
@@ -32,6 +59,10 @@
 		meta?: {
 			name?: string;
 			size?: number;
+			data?: {
+				doc_meta?: DocMeta;
+				external_ref?: { path?: string };
+			};
 		};
 		updated_at?: number;
 		user?: {
@@ -77,6 +108,67 @@
 	const cancelRename = () => {
 		editingFileId = null;
 	};
+
+	// ── Consolidated document groups (docbrowser plugin contract) ─────────────
+	// One row per DOCUMENT: files sharing a doc_key (from meta.data.doc_meta,
+	// falling back to the by-date stem of a reference path) collapse into a
+	// single meta-entry. Files without a doc_key render as before (one row
+	// each) — manual KBs and pre-migration layouts degrade gracefully.
+	const ROLE_SUFFIXES = ['_orig_front', '_orig_back', '_collated', '_layered', '_audio', '_orig'];
+
+	const docKeyFor = (file: KnowledgeFile): string | null => {
+		const dm = file?.meta?.data?.doc_meta;
+		if (dm?.doc_key) return dm.doc_key;
+		const ref = file?.meta?.data?.external_ref?.path;
+		if (typeof ref === 'string' && ref.startsWith('ref:by-date/')) {
+			const base = ref.split('/').pop() ?? '';
+			const stem = base.includes('.') ? base.slice(0, base.lastIndexOf('.')) : base;
+			for (const suf of ROLE_SUFFIXES) {
+				if (stem.endsWith(suf)) return stem.slice(0, -suf.length);
+			}
+			return stem || null;
+		}
+		return null;
+	};
+
+	const extentLabel = (dm: DocMeta | null | undefined): string | null => {
+		const ex = dm?.primary?.extent;
+		if (!ex || typeof ex.value !== 'number') return null;
+		return ex.unit ? `${ex.value} ${ex.unit}` : String(ex.value);
+	};
+
+	type FileGroup = {
+		key: string;
+		rep: KnowledgeFile; // representative row (markdown / doc_meta holder)
+		members: KnowledgeFile[];
+		docMeta: DocMeta | null;
+	};
+
+	const isMarkdownRow = (f: KnowledgeFile) =>
+		!!f?.meta?.data?.doc_meta || (f?.name ?? '').toLowerCase().endsWith('.md');
+
+	$: groups = (() => {
+		const map = new Map<string, FileGroup>();
+		for (const file of files) {
+			const dk = docKeyFor(file);
+			const gk = dk ? `doc:${dk}` : `solo:${file?.id ?? file?.tempId ?? file?.itemId}`;
+			const existing = map.get(gk);
+			if (!existing) {
+				map.set(gk, {
+					key: gk,
+					rep: file,
+					members: [file],
+					docMeta: file?.meta?.data?.doc_meta ?? null,
+				});
+			} else {
+				existing.members.push(file);
+				if (isMarkdownRow(file) && !isMarkdownRow(existing.rep)) existing.rep = file;
+				if (!existing.docMeta && file?.meta?.data?.doc_meta)
+					existing.docMeta = file.meta.data.doc_meta;
+			}
+		}
+		return [...map.values()];
+	})();
 </script>
 
 <div class=" max-h-full flex flex-col w-full gap-[0.03125rem]" role="list">
@@ -93,8 +185,12 @@
 		/>
 	{/each}
 
-	<!-- Files -->
-	{#each files as file (file?.id ?? file?.itemId ?? file?.tempId)}
+	<!-- Files (one row per document group; solo files render as before) -->
+	{#each groups as group (group.key)}
+		{@const file = group.rep}
+		{@const docMeta = group.docMeta}
+		{@const extent = extentLabel(docMeta)}
+		{@const subDocs = group.members.length}
 		<div
 			class=" flex cursor-pointer w-full px-2 bg-transparent dark:hover:bg-gray-850/50 hover:bg-white rounded-xl transition {selectedFileId
 				? ''
@@ -157,7 +253,14 @@
 							/>
 						{:else}
 							<div class="line-clamp-1 text-xs">
-								{file?.name ?? file?.meta?.name}
+								{docMeta?.title ?? file?.name ?? file?.meta?.name}
+								{#if subDocs > 1}
+									<span
+										class="rounded-md bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 text-[0.625rem] leading-none text-gray-500 dark:text-gray-400"
+										title={$i18n.t('{{count}} sub-documents', { count: subDocs })}
+									>{$i18n.t('{{count}} sub-documents', { count: subDocs })}</span
+									>
+								{/if}
 								{#if file?.meta?.size}
 									<span class="text-[0.6875rem] text-gray-500"
 										>{formatFileSize(file?.meta?.size)}</span
@@ -169,13 +272,20 @@
 				</div>
 
 				<div class="flex items-center gap-2 shrink-0">
-					{#if file?.updated_at}
-						<Tooltip content={dayjs(file.updated_at * 1000).format('LLLL')}>
-							<div class="text-xs text-gray-400">
-								{dayjs(file.updated_at * 1000).fromNow()}
-							</div>
-						</Tooltip>
+					{#if extent}
+						<span
+							class="rounded-md bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 text-[0.625rem] leading-none text-gray-500 dark:text-gray-400"
+							title={docMeta?.primary?.relpath ?? ''}
+							>{extent}</span
+						>
 					{/if}
+				{#if file?.updated_at}
+					<Tooltip content={dayjs(file.updated_at * 1000).format('LLLL')}>
+						<div class="text-xs text-gray-400">
+							{dayjs(file.updated_at * 1000).fromNow()}
+						</div>
+					</Tooltip>
+				{/if}
 
 					{#if file?.user}
 						<Tooltip
@@ -221,8 +331,13 @@
 									type="button"
 									class="select-none flex h-[1.6875rem] w-full cursor-pointer items-center gap-2 rounded-xl bg-transparent px-2 text-xs transition hover:text-gray-900 dark:hover:text-gray-100"
 									on:click={() => {
-										let fileId = file?.id ?? file?.tempId;
+									// Consolidated docs download the PRIMARY artifact
+									// (layered PDF / audio / original) via its reference
+									// row; plain files download themselves.
+									const fileId = docMeta?.primary?.file_id ?? file?.id ?? file?.tempId;
+									if (fileId) {
 										window.open(`${WEBUI_BASE_URL}/api/v1/files/${fileId}/content`, '_blank');
+									}
 									}}
 								>
 									<Download className="size-3.5" />
