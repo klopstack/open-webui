@@ -1709,7 +1709,7 @@
 													drawerTab = 'wysiwyg';
 												}}
 											>
-												{$i18n.t('WYSIWYG')}
+												{$i18n.t('Formatted')}
 											</button>
 											<button
 												class="min-w-fit py-1.5 px-4 border-b {drawerTab === 'source'
@@ -1720,7 +1720,7 @@
 													drawerTab = 'source';
 												}}
 											>
-												{$i18n.t('Source')}
+												{$i18n.t('Markdown')}
 											</button>
 										</div>
 
