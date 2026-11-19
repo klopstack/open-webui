@@ -385,11 +385,13 @@ class QdrantClient(VectorDBBase):
         if filter:
             conditions.extend(_metadata_filter(key, op, value) for key, op, value in iter_filter_conditions(filter))
         # Hybrid collections store the dense vector under a named key, so the
-        # query must address it explicitly.
-        query = (self.QDRANT_DENSE_VECTOR_NAME, vectors[0]) if self._is_hybrid_collection(mt_collection) else vectors[0]
+        # query must address it explicitly via `using=` (a (name, vector) tuple is
+        # rejected by qdrant-client's fastembed mixin: 'Unsupported query type').
+        using = self.QDRANT_DENSE_VECTOR_NAME if self._is_hybrid_collection(mt_collection) else None
         query_response = self.client.query_points(
             collection_name=mt_collection,
-            query=query,
+            query=vectors[0],
+            using=using,
             limit=limit,
             query_filter=models.Filter(must=conditions),
         )
